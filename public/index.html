@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8"/>
+    <title>Consulta Geolocalización OSM</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; max-width: 800px; margin: auto; background-color: #f8f9fa; color: #333; }
+        .tarjeta { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h2 { margin-top: 0; color: #2c3e50; text-align: center; }
+        
+        #mapa { height: 450px; width: 100%; border-radius: 12px; border: 2px solid #e9ecef; cursor: grab; }
+        #mapa.seleccionando { cursor: crosshair; }
+        
+        .seccion-botones { display: flex; gap: 20px; margin-bottom: 15px; }
+        .boton-seleccionar { padding: 12px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; margin-bottom: 8px; transition: 0.2s; font-size: 0.95em; }
+        .btn-origen { background-color: #ffebee; color: #c62828; }
+        .btn-origen:hover { background-color: #ffcdd2; }
+        .btn-destino { background-color: #e0f2f1; color: #00695c; }
+        .btn-destino:hover { background-color: #b2dfdb; }
+        
+        .btn-calcular { background-color: #1976d2; color: white; padding: 15px; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 5px; box-shadow: 0 4px 6px rgba(25, 118, 210, 0.3); transition: 0.2s; }
+        .btn-calcular:hover { background-color: #1565c0; }
+        
+        .info-texto { font-size: 0.85em; color: #777; display: block; min-height: 1.2em; margin-bottom: 10px;}
+
+        /* Estilos específicos para el historial desplegable */
+        #contenedorHistorial { position: relative; margin-top: 15px; }
+        .btn-historial { background-color: #f1f3f4; color: #5f6368; }
+        .btn-historial:hover { background-color: #e8eaed; }
+        
+        /* Esta es la lista que se muestra debajo del botón, no es un menú nativo */
+        .lista-desplegable { background: white; border: 1px solid #ddd; border-radius: 8px; position: absolute; top: 100%; left: 0; width: 100%; z-index: 1000; max-height: 250px; overflow-y: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.15); margin-top: 5px; box-sizing: border-box; }
+        .item-historial { padding: 12px; cursor: pointer; border-bottom: 1px solid #eee; font-size: 0.88em; line-height: 1.4em; }
+        .item-historial:hover { background-color: #f1f8ff; }
+        .item-historial strong { color: #1976d2; }
+        .item-historial .fecha { display: block; font-size: 0.8em; color: #999; margin-top: 3px; }
+    </style>
+</head>
+<body>
+    <div class="tarjeta">
+        <h2>Geolocalización y Rutas</h2>
+        
+        <div class="seccion-botones">
+            <div style="flex: 1;">
+                <button id="btnOrigen" class="boton-seleccionar btn-origen" onclick="activarSeleccion('origen')">Elegir Origen en el mapa</button>
+                <span class="info-texto" id="txtOrigen">No seleccionado</span>
+            </div>
+            <div style="flex: 1;">
+                <button id="btnDestino" class="boton-seleccionar btn-destino" onclick="activarSeleccion('destino')">Elegir Destino en el mapa</button>
+                <span class="info-texto" id="txtDestino">No seleccionado</span>
+            </div>
+        </div>
+
+        <button class="btn-calcular" onclick="consultar()">Calcular Ruta</button>
+        
+        <p style="text-align: center; margin-top: 20px; font-size: 1.1em; color: #555; background-color: #f1f3f4; padding: 10px; border-radius: 8px;">
+            Distancia: <strong id="dist" style="color: #333">--</strong> km | Tiempo estimado: <strong id="tiempo" style="color: #333">--</strong> min
+        </p>
+
+        <div id="contenedorHistorial">
+            <button class="boton-seleccionar btn-historial" id="btnVerHistorial" onclick="toggleHistorial()">Ver historial de rutas recientes</button>
+            <div id="listaHistorial" class="lista-desplegable" style="display: none;">
+                </div>
+        </div>
+    </div>
+
+    <div id="mapa"></div>
+
+    <script>
+        // Inicializamos el mapa centrado en Arequipa
+        const map = L.map('mapa').setView([-16.4040, -71.5369], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        let modoSeleccion = null;
+        let coords = { origen: null, destino: null };
+        let marcadores = { origen: null, destino: null };
+        let lineaCurva = null;
+        let historialVisible = false; // Estado del menú de historial
+
+        function activarSeleccion(tipo) {
+            modoSeleccion = tipo;
+            document.getElementById('mapa').classList.add('seleccionando');
+            // Ocultamos el historial si está abierto para no estorbar
+            if (historialVisible) toggleHistorial();
+        }
+
+        map.on('click', function(e) {
+            if (!modoSeleccion) return;
+            const lat = e.latlng.lat;
+            const lng = e.latlng.lng;
+            const coordsFormateadas = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+
+            if (modoSeleccion === 'origen') {
+                coords.origen = e.latlng;
+                document.getElementById('txtOrigen').innerText = `Origen fijado: ${coordsFormateadas}`;
+                if (marcadores.origen) map.removeLayer(marcadores.origen);
+                marcadores.origen = L.marker([lat, lng]).addTo(map).bindPopup("<b>Origen</b>").openPopup();
+            } else if (modoSeleccion === 'destino') {
+                coords.destino = e.latlng;
+                document.getElementById('txtDestino').innerText = `Destino fijado: ${coordsFormateadas}`;
+                if (marcadores.destino) map.removeLayer(marcadores.destino);
+                marcadores.destino = L.marker([lat, lng]).addTo(map).bindPopup("<b>Destino</b>");
+            }
+            modoSeleccion = null;
+            document.getElementById('mapa').classList.remove('seleccionando');
+        });
+
+        // Curva de Bézier cuadrática
+        function generarPuntosCurva(latlng1, latlng2) {
+            const offsetX = latlng2.lng - latlng1.lng;
+            const offsetY = latlng2.lat - latlng1.lat;
+            const r = Math.sqrt(Math.pow(offsetX, 2) + Math.pow(offsetY, 2));
+            const theta = Math.atan2(offsetY, offsetX);
+            const compensacion = (Math.PI / 8); 
+            const r2 = (r / 2) / Math.cos(compensacion);
+            const centroLat = latlng1.lat + r2 * Math.sin(theta + compensacion);
+            const centroLng = latlng1.lng + r2 * Math.cos(theta + compensacion);
+            const puntos = [];
+            for (let i = 0; i <= 50; i++) {
+                const t = i / 50;
+                const lat = Math.pow(1 - t, 2) * latlng1.lat + 2 * (1 - t) * t * centroLat + Math.pow(t, 2) * latlng2.lat;
+                const lng = Math.pow(1 - t, 2) * latlng1.lng + 2 * (1 - t) * t * centroLng + Math.pow(t, 2) * latlng2.lng;
+                puntos.push([lat, lng]);
+            }
+            return puntos;
+        }
+
+        async function consultar() {
+            if (!coords.origen || !coords.destino) {
+                alert("Primero debes seleccionar el Origen y el Destino en el mapa.");
+                return;
+            }
+            if (historialVisible) toggleHistorial(); // Cerramos historial al calcular
+
+            try {
+                const r = await api(`/api/ruta?oLat=${coords.origen.lat}&oLon=${coords.origen.lng}&dLat=${coords.destino.lat}&dLon=${coords.destino.lng}`);
+                document.getElementById('dist').textContent = r.distancia_km || '0';
+                document.getElementById('tiempo').textContent = r.duracion_min || '0';
+                dibujarRuta();
+            } catch (error) {
+                alert("Error al conectar con el servidor. Verifica que esté ejecutándose.");
+            }
+        }
+
+        // Dibuja la línea y ajusta el mapa
+        function dibujarRuta() {
+            if (lineaCurva) map.removeLayer(lineaCurva);
+            const puntosArco = generarPuntosCurva(coords.origen, coords.destino);
+            lineaCurva = L.polyline(puntosArco, { color: '#1976d2', weight: 4, opacity: 0.8, dashArray: '10, 10' }).addTo(map);
+            const grupo = new L.featureGroup([marcadores.origen, marcadores.destino, lineaCurva]);
+            map.fitBounds(grupo.getBounds(), { padding: [50, 50] });
+        }
+
+        // --- FUNCIONES DEL HISTORIAL (NUEVO) ---
+
+        // Abre o cierra el menú del historial y carga los datos si se abre
+        async function toggleHistorial() {
+            const lista = document.getElementById('listaHistorial');
+            historialVisible = !historialVisible;
+            
+            if (historialVisible) {
+                // Si lo estamos abriendo, primero cargamos las rutas actuales
+                await cargarHistorial();
+                lista.style.display = 'block';
+                document.getElementById('btnVerHistorial').textContent = 'Ocultar historial de rutas';
+            } else {
+                lista.style.display = 'none';
+                document.getElementById('btnVerHistorial').textContent = 'Ver historial de rutas recientes';
+            }
+        }
+
+        // Consulta el historial al backend y crea la lista de líneas de texto
+        async function cargarHistorial() {
+            const contenedorLista = document.getElementById('listaHistorial');
+            contenedorLista.innerHTML = ''; // Limpiamos la lista actual
+
+            try {
+                const rutas = await api('/api/historial');
+                
+                if (!rutas || rutas.length === 0) {
+                    contenedorLista.innerHTML = '<div class="item-historial">No hay rutas guardadas en el historial.</div>';
+                    return;
+                }
+
+                rutas.forEach(ruta => {
+                    const p = ruta.parametros;
+                    const fechaRaw = new Date(ruta.fecha);
+                    // Formateamos la fecha para que sea legible
+                    const fecha = fechaRaw.toLocaleDateString() + ' ' + fechaRaw.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    
+                    const divRuta = document.createElement('div');
+                    divRuta.className = 'item-historial';
+                    // Creamos el contenido de texto para cada línea
+                    divRuta.innerHTML = `
+                        De <strong>[${p.oLat.toFixed(4)}, ${p.oLon.toFixed(4)}]</strong> 
+                        a <strong>[${p.dLat.toFixed(4)}, ${p.dLon.toFixed(4)}]</strong>
+                        <span class="fecha">${fecha}</span>
+                    `;
+                    
+                    // Al hacer clic, cargamos la ruta y cerramos el historial
+                    divRuta.onclick = () => seleccionarRutaHistorial(p);
+                    contenedorLista.appendChild(divRuta);
+                });
+            } catch (error) {
+                contenedorLista.innerHTML = '<div class="item-historial">Error al cargar el historial.</div>';
+            }
+        }
+
+        // Carga las coordenadas históricas en el mapa y lo re-dibuja
+        async function seleccionarRutaHistorial(p) {
+            // Actualizamos el estado global de coordenadas
+            coords.origen = L.latLng(p.oLat, p.oLon);
+            coords.destino = L.latLng(p.dLat, p.dLon);
+            
+            // Actualizamos los textos debajo de los botones
+            document.getElementById('txtOrigen').innerText = `Origen (Historial): ${p.oLat.toFixed(6)}, ${p.oLon.toFixed(6)}`;
+            document.getElementById('txtDestino').innerText = `Destino (Historial): ${p.dLat.toFixed(6)}, ${p.dLon.toFixed(6)}`;
+
+            // Actualizamos los marcadores físicos en el mapa
+            if (marcadores.origen) map.removeLayer(marcadores.origen);
+            marcadores.origen = L.marker(coords.origen).addTo(map).bindPopup("<b>Origen (Historial)</b>");
+            
+            if (marcadores.destino) map.removeLayer(marcadores.destino);
+            marcadores.destino = L.marker(coords.destino).addTo(map).bindPopup("<b>Destino (Historial)</b>");
+
+            // Calculamos nuevamente la distancia/tiempo y dibujamos la curva
+            // Esto llamará a dibujarRuta() internamente
+            await consultar();
+
+            // Cerramos el historial como solicitaste
+            toggleHistorial();
+        }
+
+        const api = url => fetch(url).then(r => r.json());
+    </script>
+</body>
+</html>
